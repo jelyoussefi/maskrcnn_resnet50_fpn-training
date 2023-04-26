@@ -14,6 +14,7 @@ export DOCKER_BUILDKIT=1
 DOCKER_RUN_PARAMS= \
 	-it --rm -a stdout -a stderr -e DISPLAY=${DISPLAY} -e NO_AT_BRIDGE=1  \
 	--device /dev/dri \
+	--gpus all \
 	-v ${CURRENT_DIR}/dataset:/workspace/dataset \
 	-v ${CURRENT_DIR}/model:/workspace/model \
 	-v /tmp/.X11-unix:/tmp/.X11-unix  -v ${HOME}/.Xauthority:/home/root/.Xauthority \
