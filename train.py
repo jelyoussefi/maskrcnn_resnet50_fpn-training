@@ -31,7 +31,7 @@ class CocoDataset(Dataset):
 		self.coco = COCO(ann_path)
 		self.cat_ids = self.coco.getCatIds()
 		self.augmentation = augmentation
-
+		
 	def __len__(self):
 		return len(self.coco.imgs)
 	  
@@ -39,29 +39,28 @@ class CocoDataset(Dataset):
 		ann_ids = self.coco.getAnnIds([index])
 		anns = self.coco.loadAnns(ann_ids)
 		masks=[]
-      
 		for ann in anns:
 			mask = self.coco.annToMask(ann)
 			masks.append(mask)
-
+	
 		return masks
 
 	def get_boxes(self, masks):
 		num_objs = len(masks)
 		boxes = []
-
 		for i in range(num_objs):
 			x,y,w,h = cv2.boundingRect(masks[i])
 			boxes.append([x, y, x+w, y+h])
-
+		
 		return np.array(boxes)
 
 	def __getitem__(self, index):
 		# Load image
 		img_info = self.coco.loadImgs([index])[0]
-		image = cv2.imread(os.path.join(self.dataset_path,
-		                            img_info['file_name']))
+		image = cv2.imread(os.path.join(self.dataset_path, img_info['file_name']))
 		masks = self.get_masks(index)
+		if len(masks) == 0 :
+			 return None
 
 		if self.augmentation:
 			augmented = self.augmentation(image=image, masks=masks)
@@ -79,6 +78,7 @@ class CocoDataset(Dataset):
 		labels = torch.ones((num_objs,), dtype=torch.int64)
 		masks = torch.as_tensor(masks, dtype=torch.uint8)
 		image = torch.as_tensor(image, dtype=torch.float32)
+
 		targets = {}
 		targets["boxes"] =  boxes
 		targets["labels"] = labels
@@ -115,6 +115,8 @@ transform = A.Compose([
 def collate_fn(batch):
 	images = list()
 	targets = list()
+	batch = list(filter(lambda x: x is not None, batch))
+    
 	for b in batch:
 		images.append(b[0])
 		targets.append(b[1])
@@ -143,14 +145,14 @@ def train(loader, model, optimizer, device):
 
 	for batch_idx, (images, targets) in enumerate(loop):
 		images = list(image.to(device) for image in images)
-		targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-		if len(targets[0]['labels']) > 0:
-			loss = model(images , targets)
-			losses = sum([l for l in loss.values()])
-			train_epoch_loss += losses.cpu().detach().numpy()
-			optimizer.zero_grad()
-			losses.backward()
-			optimizer.step()
+		targets = [{k: v.to(device) for k, v in t.items()  } for t in targets]
+		loss = model(images , targets)
+		losses = sum([l for l in loss.values()])
+		train_epoch_loss += losses.cpu().detach().numpy()
+		optimizer.zero_grad()
+		losses.backward()
+		optimizer.step()
+		
 	return train_epoch_loss
 
 #----------------------------------------------------------------------------------------------
@@ -163,11 +165,11 @@ def validate(loader, model, optimizer, device):
 	with torch.no_grad():
 		for batch_idx, (images, targets) in enumerate(loop):
 			images = list(image.to(device) for image in images)
-			targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-			if len(targets[0]['labels']) > 0:
-				loss = model(images , targets)
-				losses = sum([l for l in loss.values()])
-				val_epoch_loss += losses.cpu().detach().numpy()
+			targets = [{k: v.to(device) for k, v in t.items() } for t in targets]
+			loss = model(images , targets)
+			losses = sum([l for l in loss.values()])
+			val_epoch_loss += losses.cpu().detach().numpy()
+			
 	return val_epoch_loss;
 
 #----------------------------------------------------------------------------------------------
@@ -198,20 +200,20 @@ def run(dataset_path, output_dir):
 
 	num_classes = len(train_dataset.cat_ids)
 	model = Model(num_classes)().to(device)
-	optimizer = torch.optim.SGD(params=model.parameters(), lr=0.005, momentum=0.9, weight_decay=0.0005)
+	
+	params = [p for p in model.parameters() if p.requires_grad]
+	optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
 
 	model.train()
 	num_epocs = 50
 
 	all_train_losses = []
 	all_val_losses = []
-	for epoch in range(30):
-		train_epoch_loss = 0
-		val_epoch_loss = 0
+	for epoch in range(num_epocs):
 		model.train()
 		train_epoch_loss = train(train_loader, model, optimizer, device)   
 		all_train_losses.append(train_epoch_loss)
-		valid_epoch_loss = valid(valid_loader, model, optimizer, device)
+		val_epoch_loss = validate(valid_loader, model, optimizer, device)
 		all_val_losses.append(val_epoch_loss)
 		print(epoch , "  " , train_epoch_loss , "  " , val_epoch_loss)
 
