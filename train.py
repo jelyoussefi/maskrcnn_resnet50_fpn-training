@@ -8,13 +8,12 @@ from pycocotools.coco import COCO
 from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torchvision import transforms as T
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
-import torchvision.models.detection.mask_rcnn
+from model import Model
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -27,12 +26,11 @@ warnings.filterwarnings("ignore")
 #----------------------------------------------------------------------------------------------
 class CocoDataset(Dataset):
 	def __init__(self, dataset_path, mode = 'train', augmentation=None):
-		if mode == 'train':
-			self.dataset_path = os.path.join(dataset_path, mode)
-			ann_path = os.path.join(self.dataset_path, '_annotations.coco.json')
-			self.coco = COCO(ann_path)
-			self.cat_ids = self.coco.getCatIds()
-			self.augmentation = augmentation
+		self.dataset_path = os.path.join(dataset_path, mode)
+		ann_path = os.path.join(self.dataset_path, '_annotations.coco.json')
+		self.coco = COCO(ann_path)
+		self.cat_ids = self.coco.getCatIds()
+		self.augmentation = augmentation
 
 	def __len__(self):
 		return len(self.coco.imgs)
@@ -81,12 +79,12 @@ class CocoDataset(Dataset):
 		labels = torch.ones((num_objs,), dtype=torch.int64)
 		masks = torch.as_tensor(masks, dtype=torch.uint8)
 		image = torch.as_tensor(image, dtype=torch.float32)
-		data = {}
-		data["boxes"] =  boxes
-		data["labels"] = labels
-		data["masks"] = masks
+		targets = {}
+		targets["boxes"] =  boxes
+		targets["labels"] = labels
+		targets["masks"] = masks
 
-		return image, data
+		return image, targets
 
 #----------------------------------------------------------------------------------------------
 # Data Augmentation
@@ -136,100 +134,50 @@ def save(model, output_dir):
 	os.symlink(os.path.basename(model_path), model_path_symblink)
 
 #----------------------------------------------------------------------------------------------
-# Model
-#----------------------------------------------------------------------------------------------
-def get_model_instance_segmentation(num_classes):
-    # Load an instance segmentation model pre-trained on COCO
-    model = torchvision.models.detection.maskrcnn_resnet50_fpn(pretrained=True)
-
-    # Get number of input features for the classifier
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    # replace the pre-trained head with a new one
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-
-    # Get the number of input features for the mask classifier
-    in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
-    hidden_layer = 256
-    # Replace the mask predictor with a new one
-    model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask,
-                                                       hidden_layer,
-                                                       num_classes)
-
-    return model
-
-
-#----------------------------------------------------------------------------------------------
 #  Training
 #----------------------------------------------------------------------------------------------
-def train_one_epoch(loader, model, optimizer, device):
+
+def train(loader, model, optimizer, device):
+	train_epoch_loss = 0
 	loop = tqdm(loader)
 
 	for batch_idx, (images, targets) in enumerate(loop):
 		images = list(image.to(device) for image in images)
 		targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-		loss_dict = model(images, targets)
-		losses = sum(loss for loss in loss_dict.values())
-
-		optimizer.zero_grad()
-		losses.backward()
-		optimizer.step()
-
-	print(f"Total loss: {losses.item()}")
+		if len(targets[0]['labels']) > 0:
+			loss = model(images , targets)
+			losses = sum([l for l in loss.values()])
+			train_epoch_loss += losses.cpu().detach().numpy()
+			optimizer.zero_grad()
+			losses.backward()
+			optimizer.step()
+	return train_epoch_loss
 
 #----------------------------------------------------------------------------------------------
 #  Validation
 #----------------------------------------------------------------------------------------------
-best_vloss = np.inf
-def validate(loader, model, optimizer, device, epoch):
-    global best_vloss
-    loop = tqdm(loader)
-    running_vloss = 0
-    for batch_idx, (images, targets) in enumerate(loop):
-        images = list(image.to(device) for image in images)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        
-        with torch.no_grad():
-          loss_dict = model(images, targets)
-        
-        losses = sum(loss for loss in loss_dict.values())
-        running_vloss += losses
-        
-    avg_vloss = running_vloss / (batch_idx + 1)
     
-    print(f"Avg Valid Loss: {avg_vloss}")
-    if avg_vloss < best_vloss:
-      best_vloss = avg_vloss
-      if SAVE_MODEL:
-            print("Model improved, saving...")
-            checkpoint = {
-                "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            #save_checkpoint(checkpoint, filename=f"1152KaggleBest_second_{epoch}.pth.tar")
-    print('\n')
-    return avg_vloss
+def validate(loader, model, optimizer, device):
+	val_epoch_loss = 0
+	loop = tqdm(loader)
+	with torch.no_grad():
+		for batch_idx, (images, targets) in enumerate(loop):
+			images = list(image.to(device) for image in images)
+			targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+			if len(targets[0]['labels']) > 0:
+				loss = model(images , targets)
+				losses = sum([l for l in loss.values()])
+				val_epoch_loss += losses.cpu().detach().numpy()
+	return val_epoch_loss;
 
-
-def train_one_epoch(loader, model, optimizer, device):
-    loop = tqdm(loader)
-
-    for batch_idx, (images, targets) in enumerate(loop):
-        images = list(image.to(device) for image in images)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values())
-
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
-        
+#----------------------------------------------------------------------------------------------
+#  Main loop
+#----------------------------------------------------------------------------------------------
 
 def run(dataset_path, output_dir):
 
 	device = "cuda" if torch.cuda.is_available() else "cpu"
-	lr_rate = 1e-5
-	weight_decay = 5e-4
+	
 	batch_size = 2
 	image_size = [640,640]
 
@@ -249,16 +197,23 @@ def run(dataset_path, output_dir):
 								collate_fn=collate_fn)
 
 	num_classes = len(train_dataset.cat_ids)
-	model = get_model_instance_segmentation(num_classes)
-	model.to(device)
-	optimizer = torch.optim.AdamW(params=model.parameters(), lr=lr_rate, weight_decay=weight_decay)
+	model = Model(num_classes)().to(device)
+	optimizer = torch.optim.SGD(params=model.parameters(), lr=0.005, momentum=0.9, weight_decay=0.0005)
 
 	model.train()
 	num_epocs = 50
-	for epoch in range(num_epocs):
-		print(f"Epoch: {epoch}")
-		train_one_epoch(train_loader, model, optimizer, device)
-		vloss= validate(valid_loader, model, optimizer, device, epoch)
+
+	all_train_losses = []
+	all_val_losses = []
+	for epoch in range(30):
+		train_epoch_loss = 0
+		val_epoch_loss = 0
+		model.train()
+		train_epoch_loss = train(train_loader, model, optimizer, device)   
+		all_train_losses.append(train_epoch_loss)
+		valid_epoch_loss = valid(valid_loader, model, optimizer, device)
+		all_val_losses.append(val_epoch_loss)
+		print(epoch , "  " , train_epoch_loss , "  " , val_epoch_loss)
 
 	save(model,output_dir)
 

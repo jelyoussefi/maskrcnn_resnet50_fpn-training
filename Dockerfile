@@ -9,5 +9,5 @@ RUN pip3 install torch==1.13.0+cu116 torchvision==0.14.0+cu116 -f https://downlo
 RUN apt install -y python3-dev
 RUN pip3 install pycocotools albumentations
 RUN mkdir -p  /workspace/
-COPY train.py  /workspace/
+COPY train.py model.py /workspace/
 WORKDIR /workspace 
