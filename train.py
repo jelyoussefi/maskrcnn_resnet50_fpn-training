@@ -1,4 +1,4 @@
-import os,sys,time,argparse
+import os,sys,time,argparse,datetime
 import numpy as np
 import math
 import cv2
@@ -9,17 +9,13 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torchvision import transforms as T
-
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-
+from torch.utils.tensorboard import SummaryWriter
 from model import Model
 import warnings
 
 warnings.filterwarnings("ignore")
-
-
-
 
 #----------------------------------------------------------------------------------------------
 # Data Set 
@@ -140,37 +136,40 @@ def save(model, output_dir):
 #----------------------------------------------------------------------------------------------
 
 def train(loader, model, optimizer, device):
-	train_epoch_loss = 0
-	loop = tqdm(loader)
-
-	for batch_idx, (images, targets) in enumerate(loop):
+	loss_epoch = []
+    
+	for batch_idx, (images, targets) in enumerate(tqdm(loader)):
 		images = list(image.to(device) for image in images)
 		targets = [{k: v.to(device) for k, v in t.items()  } for t in targets]
-		loss = model(images , targets)
-		losses = sum([l for l in loss.values()])
-		train_epoch_loss += losses.cpu().detach().numpy()
 		optimizer.zero_grad()
-		losses.backward()
+		loss_dict = model(images , targets)
+		losses = sum(loss for loss in loss_dict.values())
+		losses.backward()       
 		optimizer.step()
-		
-	return train_epoch_loss
+		loss_epoch.append(losses.item())
+
+	loss_epoch_mean = np.mean(loss_epoch) 		
+	return  loss_epoch_mean * 100.  
+
 
 #----------------------------------------------------------------------------------------------
 #  Validation
 #----------------------------------------------------------------------------------------------
     
 def validate(loader, model, optimizer, device):
-	val_epoch_loss = 0
-	loop = tqdm(loader)
+	loss_epoch = []
+	
 	with torch.no_grad():
-		for batch_idx, (images, targets) in enumerate(loop):
+		for batch_idx, (images, targets) in enumerate(tqdm(loader)):
 			images = list(image.to(device) for image in images)
 			targets = [{k: v.to(device) for k, v in t.items() } for t in targets]
-			loss = model(images , targets)
-			losses = sum([l for l in loss.values()])
-			val_epoch_loss += losses.cpu().detach().numpy()
+			loss_dict = model(images , targets)
+			losses = sum(loss for loss in loss_dict.values())
+			loss_epoch.append(losses.item())
+
 			
-	return val_epoch_loss;
+	loss_epoch_mean = np.mean(loss_epoch) 		
+	return  loss_epoch_mean * 100.
 
 #----------------------------------------------------------------------------------------------
 #  Main loop
@@ -204,18 +203,40 @@ def run(dataset_path, output_dir):
 	params = [p for p in model.parameters() if p.requires_grad]
 	optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
 
-	model.train()
-	num_epocs = 50
+	writer = SummaryWriter()
 
-	all_train_losses = []
-	all_val_losses = []
+	model.train()
+	
+	best_valid_loss = float('inf')
+	best_epoch = 0
+	patience = 10
+	counter = 0
+	
+	num_epocs = 50
+	
 	for epoch in range(num_epocs):
 		model.train()
 		train_epoch_loss = train(train_loader, model, optimizer, device)   
-		all_train_losses.append(train_epoch_loss)
 		val_epoch_loss = validate(valid_loader, model, optimizer, device)
-		all_val_losses.append(val_epoch_loss)
-		print(epoch , "  " , train_epoch_loss , "  " , val_epoch_loss)
+
+		writer.add_scalars('Loss', {'train': train_epoch_loss}, epoch)
+		writer.add_scalars('Loss', {'valid': val_epoch_loss}, epoch)
+		writer.flush()
+		
+		print(f"\t epoch : {epoch}\ttrain_loss : {train_epoch_loss:.2f}\tval_loss : {val_epoch_loss:.2f}")
+		
+		# Early stopping
+		if val_epoch_loss < best_valid_loss:
+			best_valid_loss = val_epoch_loss
+			best_epoch = epoch
+			counter = 0
+		else:
+			counter += 1
+			if counter >= patience:
+				print(f'Early stopping at epoch {epoch}')
+				print(f'Best validation loss: {best_valid_loss:.4f}')
+				print(f'Best epoch: {best_epoch}')
+				break
 
 	save(model,output_dir)
 

@@ -19,6 +19,7 @@ DOCKER_RUN_PARAMS= \
 	-v ${CURRENT_DIR}/model:/workspace/model \
 	-v /tmp/.X11-unix:/tmp/.X11-unix  -v ${HOME}/.Xauthority:/home/root/.Xauthority \
 	-v ${CURRENT_DIR}/.cache:/root/.cache \
+	-v ${CURRENT_DIR}/runs:/workspace/runs \
 	${DOCKER_IMAGE_NAME}
 	
 #----------------------------------------------------------------------------------------------------------------------
@@ -32,9 +33,14 @@ build:
 	@docker build . -t ${DOCKER_IMAGE_NAME}
 	
 train: build
-	@$(call msg, Training the ${MODEL_NAME} model  ...)
+	@$(call msg, Training the maskrcnn-resnet50-fpn model  ...)
+	@sudo rm -rf ./runs
 	@docker run ${DOCKER_RUN_PARAMS} \
 		python3 ./train.py --dataset=./dataset
+
+monitor:
+	@$(call msg, Monitoring ...)
+	@tensorboard --logdir=runs --bind_all
 
 #----------------------------------------------------------------------------------------------------------------------
 # helper functions
